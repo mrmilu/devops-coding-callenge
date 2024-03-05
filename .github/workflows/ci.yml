@@ -1,0 +1,155 @@
+name: Django (test, build, deploy)
+on: [push]
+
+env:
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: devops_interview_test
+  POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+  POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+  GITHUB_REGISTRY: ghcr.io
+  GITHUB_REPOSITORY: d4nny-dev
+  DOCKER_IMAGE_TAG: app-django:latest
+  TERRAFORM_VERSION: 1.7.2
+
+jobs:
+  test-and-coverage:
+    name: Test and coverage
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"] # NOTE: I will keep this simple, but the propose should be have several version to guaranty compatibility
+
+    # DECISION: Deploy the mandatory services to execute the tests.
+    services:
+      db:
+        image: postgres:14
+        env:
+          POSTGRES_HOST: postgres
+          POSTGRES_PORT: ${{ env.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        ports:
+          - '5432:5432'
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip3 install -r requirements/local.txt
+
+      # Error / Violation Codes: https://flake8.pycqa.org/en/latest/user/error-codes.html
+      # pep8 https://pep8.readthedocs.io/en/latest/intro.html#error-codes
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=F401,E1,E2 --show-source --statistics
+
+      # DECISION: Ensure that the test coverage meets the appropriate thresholds.
+      - name: Execute test
+        run: |
+          DATABASE_URL='postgres://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:${{ env.POSTGRES_PORT }}/${{ env.POSTGRES_DB }}' \
+          CELERY_BROKER_URL='' coverage run -m pytest
+          coverage report --fail-under=80
+
+  build-docker-image:
+    name: Build docker image
+    runs-on: ubuntu-latest
+    needs: test-and-coverage
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: BUILD_ENVIRONMENT=production
+          file: ./compose/local/django/Dockerfile
+          tags: ${{ env.GITHUB_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}/${{ env.DOCKER_IMAGE_TAG }}
+
+      - name: Log in to registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.GITHUB_REGISTRY }} -u $ --password-stdin
+
+      # DECISION: Check the security vulneravilities related to the docker image
+      - name: Scan Docker image
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        with:
+          image: ${{ env.GITHUB_REGISTRY }}/${{ env.GITHUB_REPOSITORY }}/${{ env.DOCKER_IMAGE_TAG }}
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+    # FIX: Parsing restricted subset of SARIF data has failed: parse error: expected string near
+    # offset 1150 of '7.5'
+    # - name: Upload result to GitHub Code Scanning
+    #   uses: github/codeql-action/upload-sarif@v3
+    #   with:
+    #     sarif_file: snyk.sarif
+
+      - name: Push image
+        run: docker push ${{ env.GITHUB_REGISTRY }}/${{env.GITHUB_REPOSITORY}}/${{env.DOCKER_IMAGE_TAG}}
+
+  # DECISION: Create a dummy example about how validate the terraform code and plan operation
+  # TODO: Add the required config to the project to declare the infra componets (terraform init...)
+  # terraform:
+  #   name: "Terraform check"
+  #   runs-on: ubuntu-latest
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #       # We keep Terraform files in the terraform directory.
+  #       working-directory: ./infra
+
+  #   steps:
+  #     - name: Checkout the repository to the runner
+  #       uses: actions/checkout@v4
+
+  #     - name: Setup Terraform with specified version on the runner
+  #       uses: hashicorp/setup-terraform@v3
+  #       with:
+  #         terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+  #     - name: Terraform init
+  #       id: init
+  #       run: terraform init -backend-config="bucket=${{ secrets.SE_BUCKET_TF_STATE }}"
+
+  #     - name: Terraform format
+  #       id: fmt
+  #       run: terraform fmt -check
+
+  #     - name: Terraform validate
+  #       id: validate
+  #       run: terraform validate
+
+  #     - name: Terraform plan
+  #       id: plan
+  #       if: github.event_name == 'pull_request'
+  #       run: terraform plan -no-color -input=false
+  #       continue-on-error: true
+
+  # DECISION: Create a dummy deploy for multiple environments (dev, pro)
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: build-docker-image
+    strategy:
+      matrix:
+        target: [development, production]
+
+    environment:
+      name: ${{ matrix.target }}
+
+    steps:
+      - name: Deploy to ${{ matrix.target }} environment
+        run: |
+          # Dummy example deployment...
+          echo "Deploying to ${{ matrix.target }} environment"
